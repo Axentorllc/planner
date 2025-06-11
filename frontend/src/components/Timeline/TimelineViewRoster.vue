@@ -262,6 +262,7 @@
                     v-for="(date, colIdx) in dateColumns"
                     :key="`${assignee.id}-${date.key}`"
                     class="date-cell p-2 relative min-h-[80px] align-top"
+                    :data-date="date.key"
                     :class="{
                       'border-l border-gray-200 dark:border-gray-600': colIdx >= 0,
                       'bg-blue-50/50 dark:bg-blue-900/10': date.isToday,
@@ -269,6 +270,7 @@
                       'bg-yellow-50/30 dark:bg-yellow-900/10': date.isHoliday,
                       'hover:bg-gray-50 dark:hover:bg-gray-700/20': !date.isToday && !date.isWeekend && !date.isHoliday,
                       'drop-zone-active': isDragOver && dragOverDate === date.key && dragOverAssignee === assignee.id,
+                      'resize-highlight': isResizing && resizeDirection?.value === 'end' && date.date <= resizeEndDate?.value && date.date >= resizeStartDate?.value,
                       'overallocated': isDayOverallocated(assignee.id, date.date)
                     }"
                     @drop="handleDrop($event, assignee.id, date.date)"
@@ -294,13 +296,17 @@
                       <div
                         v-for="task in getTasksForDateAndAssignee(assignee.id, date.date)"
                         :key="task.id"
-                        class="task-block cursor-move group rounded-lg shadow-sm hover:shadow-md transition-all duration-200 p-2 relative"
-                        :class="getTaskBlockClass(task)"
+                        class="task-block group rounded-lg shadow-sm hover:shadow-md transition-all duration-200 p-2 relative cursor-move"
+                        :class="[
+                          getTaskBlockClass(task),
+                          { 'resizing': isResizing && resizingTask?.id === task.id }
+                        ]"
                         @click.stop="$emit('taskClick', task.id)"
                         draggable="true"
                         @dragstart="handleDragStart($event, task)"
                         :title="`${task.title} - ${task.project} (${task.duration}h)`"
                       >
+                        <!-- Task content -->
                         <div class="text-xs text-white">
                           <div class="font-semibold truncate mb-1 text-[11px]">{{ task.title }}</div>
                           <div class="text-white/80 truncate text-[10px] mb-1">{{ task.project }}</div>
@@ -318,6 +324,18 @@
                             </div>
                           </div>
                         </div>
+
+                        <!-- Resize handles -->
+                        <div
+                          v-if="task.startDate && task.endDate"
+                          class="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-white/20"
+                          @mousedown.stop="startResize($event, task, 'start')"
+                        ></div>
+                        <div
+                          v-if="task.startDate && task.endDate"
+                          class="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-white/20"
+                          @mousedown.stop="startResize($event, task, 'end')"
+                        ></div>
                         
                         <!-- Task progress bar -->
                         <div v-if="task.progress > 0" class="absolute bottom-0 left-0 right-0 h-1 bg-white/20 rounded-b-lg overflow-hidden">
@@ -456,6 +474,11 @@ const isDragOver = ref(false)
 const dragOverAssignee = ref(null)
 const dragOverDate = ref(null)
 const hoveredCell = ref({ assignee: '', date: '' })
+const isResizing = ref(false)
+const resizingTask = ref(null)
+const resizeStartDate = ref(null)
+const resizeEndDate = ref(null)
+const resizeDirection = ref(null) // 'start' or 'end'
 
 // Constants
 const viewModes = [
@@ -909,6 +932,69 @@ const handleCellClick = (assigneeId, date) => {
   emit('cellClick', { assigneeId, date })
 }
 
+// Resize handlers
+const startResize = (event, task, direction) => {
+  event.stopPropagation()
+  isResizing.value = true
+  resizingTask.value = task
+  resizeDirection.value = direction
+  resizeStartDate.value = new Date(task.startDate)
+  resizeEndDate.value = new Date(task.endDate)
+  
+  // Add event listeners
+  window.addEventListener('mousemove', handleResize)
+  window.addEventListener('mouseup', endResize)
+}
+
+const handleResize = (event) => {
+  if (!isResizing.value || !resizingTask.value) return
+  
+  // Get the cell element under the mouse
+  const elementsUnderMouse = document.elementsFromPoint(event.clientX, event.clientY)
+  const cellElement = elementsUnderMouse.find(el => el.classList.contains('date-cell'))
+  
+  if (!cellElement) return
+  
+  // Get the date from the cell's data
+  const cellDate = dateColumns.value.find(col => 
+    cellElement.getAttribute('data-date') === col.key
+  )?.date
+  
+  if (!cellDate) return
+  
+  // Update the task dates based on resize direction
+  if (resizeDirection.value === 'start') {
+    if (cellDate <= resizeEndDate.value) {
+      resizeStartDate.value = cellDate
+    }
+  } else {
+    if (cellDate >= resizeStartDate.value) {
+      resizeEndDate.value = cellDate
+    }
+  }
+  
+  // Update the task in the parent component
+  emit('taskMove', {
+    taskId: resizingTask.value.id,
+    assigneeId: resizingTask.value.assignee,
+    startDate: resizeStartDate.value.toISOString(),
+    endDate: resizeEndDate.value.toISOString(),
+    operation: 'resize'
+  })
+}
+
+const endResize = () => {
+  isResizing.value = false
+  resizingTask.value = null
+  resizeDirection.value = null
+  resizeStartDate.value = null
+  resizeEndDate.value = null
+  
+  // Remove event listeners
+  window.removeEventListener('mousemove', handleResize)
+  window.removeEventListener('mouseup', endResize)
+}
+
 // Watch for prop changes
 watch(() => props.assignees, () => {
   // Recalculate when assignees change
@@ -1098,5 +1184,45 @@ onMounted(() => {
 /* Dark mode scrollbar */
 .dark * {
   scrollbar-color: rgb(75 85 99) rgb(55 65 81);
+}
+
+.task-block.resizing {
+  opacity: 0.8;
+  cursor: ew-resize !important;
+  background-color: rgba(255, 255, 255, 0.9);
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.4);
+}
+
+.resize-highlight {
+  background-color: rgba(219, 234, 254, 0.3);
+}
+
+.dark .resize-highlight {
+  background-color: rgba(30, 58, 138, 0.2);
+}
+
+.task-block .resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.task-block .resize-handle:hover,
+.task-block:hover .resize-handle {
+  opacity: 1;
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
+.task-block .resize-handle-left {
+  left: 0;
+}
+
+.task-block .resize-handle-right {
+  right: 0;
 }
 </style>
